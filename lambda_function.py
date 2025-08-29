@@ -27,7 +27,7 @@ elif account_id == "808329257923":
 elif account_id == "652058538377":
     account_name = "tttc-itim-prod"
 
-logs_s3bucket = f"s3-{account_name}-itim-processing-notifications"
+logs_s3bucket = f"s3-{account_name}-processing-notifications"
 errors_folder = "ERRORS/search-rds/" #"TEST/ERRORS/search-rds/"
 
 
@@ -360,12 +360,12 @@ def lambda_handler(event, context):
         EXECUTE_QUERY = f'''
 WITH 
 	fg AS (
-	    SELECT cutting_center, customer, 'fg' AS table_type
+	    SELECT center AS cutting_center, customer, 'fg' AS table_type
 	    FROM {TABLE_FG} 
 	    GROUP BY cutting_center, customer
 	),
 	mc AS (
-	    SELECT cutting_center, customer, 'mc' AS table_type
+	    SELECT center AS cutting_center, customer, 'mc' AS table_type
 	    FROM {TABLE_MC} 
 	    GROUP BY cutting_center, customer
 	),
