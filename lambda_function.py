@@ -1,3 +1,9 @@
+'''
+AWS Lambda function to search RDS MySQL database based on event_type and parameters.
+Last Edited: 2024-08-29 16:00        TTS-T Saowanee
+    Event Types: 
+'''
+
 import json
 import pymysql
 import os
@@ -303,8 +309,14 @@ def lambda_handler(event, context):
     ## ------------ 5. get_upd_timestamp ------------
     elif event_type == "5":
         print("event_type: =======> 5. get_upd_timestamp")
-        EXECUTE_QUERY = f"SELECT stamp_month, upd_timestamp, src_file_nm FROM {UPD_TIMESTAMP} "
-        WHERE_CONDITIONS = "ORDER BY stamp_month desc, upd_timestamp desc LIMIT 1;"
+        EXECUTE_QUERY = f"SELECT stamp_month, upd_timestamp, src_file_nm, src_table FROM {UPD_TIMESTAMP} "
+        WHERE_CONDITIONS = "WHERE src_table NOT IN ('fg' , 'mc' , 'shipout') ORDER BY stamp_month DESC, upd_timestamp DESC ;"
+
+    ## ------------ 5-1. get_upd_timestamp_fg ------------
+    elif event_type == "5-1":
+        print("event_type: =======> 5-1. get_upd_timestamp_fg")
+        EXECUTE_QUERY = f"SELECT stamp_month, upd_timestamp, src_file_nm, src_table FROM {UPD_TIMESTAMP} "
+        WHERE_CONDITIONS = "WHERE src_table IN ('fg' , 'mc' , 'shipout') ORDER BY stamp_month DESC, upd_timestamp DESC ;"
     
     ## ------------ 6. search_cuttingcenter_mc ------------
     elif event_type == "6":
