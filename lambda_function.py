@@ -1,14 +1,16 @@
 '''
 AWS Lambda function to search RDS MySQL database based on event_type and parameters.
-Last Edited: 2024-08-29 16:00        TTS-T Saowanee
-    Event Types: 
+---------------------------------------------------------
+last updated:
+2024-08-29 16:00 TTS-T Saowanee) revise upd_timestamp query to exclude fg, mc, shipout
+2025-09-10 15:30 TTS-T Saowanee) apply boto3 logger to CloudWatch
 '''
-
 import json
 import pymysql
 import os
 import boto3
 import sys
+import logging
 from datetime import datetime, timedelta
 import traceback
 
@@ -23,6 +25,13 @@ TABLE_FG = "CUTTINGCENTER_BAL_FG"
 TABLE_MC = "CUTTINGCENTER_BAL_MC"
 UPD_TIMESTAMP = "UPD_TIMESTAMP"
 
+# ===== boto3/botocore streaming logger (to CloudWatch via stdout) =====
+# Control with env var BOTO3_LOG_LEVEL = DEBUG|INFO|WARNING|ERROR|CRITICAL (default: WARNING)
+_BOTO3_LOG_LEVEL = os.getenv("BOTO3_LOG_LEVEL", "WARNING").upper()
+_LOG_LEVEL = getattr(logging, _BOTO3_LOG_LEVEL, logging.WARNING)
+boto3.set_stream_logger("boto3", level=_LOG_LEVEL)
+boto3.set_stream_logger("botocore", level=_LOG_LEVEL)
+
 # Get AWS account ID
 account_name = ""
 account_id = boto3.client('sts').get_caller_identity()['Account']
@@ -32,10 +41,8 @@ elif account_id == "808329257923":
     account_name = "tttc-itim-nonprod"
 elif account_id == "652058538377":
     account_name = "tttc-itim-prod"
-
 logs_s3bucket = f"s3-{account_name}-processing-notifications"
-errors_folder = "ERRORS/search-rds/" #"TEST/ERRORS/search-rds/"
-
+errors_folder = "ERRORS/search-rds/"  #"TEST/ERRORS/search-rds/"
 
 # Define a mapping of exceptions to HTTP status codes
 exception_status_codes = {
@@ -43,21 +50,19 @@ exception_status_codes = {
     KeyError: 400,     # Bad Request
     ValueError: 422,   # Unprocessable Entity
     TypeError: 400,    # Bad Request
-    TimeoutError: 504 # Gateway Timeout
+    TimeoutError: 504  # Gateway Timeout
     # Add more exceptions and corresponding status codes as needed
 }
 
-## =================================== get database secret ===================================  
+## =================================== get database secret ===================================
 def get_secret():
     secret_name = os.getenv('DB_SECRET_NAME')
-    region_name = "ap-southeast-7"                                  ## Changed 8-Aug-25
-
+    region_name = "ap-southeast-7" ## Changed 8-Aug-25
     # Create a Secrets Manager client
     client = boto3.client(
         service_name='secretsmanager',
         region_name=region_name
     )
-
     try:
         get_secret_value_response = client.get_secret_value(
             SecretId=secret_name
@@ -74,7 +79,6 @@ def get_secret():
     except Exception as e:
         print(f"Unexpected error: {e}")
         raise
-
     secret = get_secret_value_response['SecretString']
     return json.loads(secret)
 
@@ -83,29 +87,28 @@ db_host = secrets['host']
 db_username = secrets['username']
 db_password = secrets['password']
 db_name = secrets['dbname']
-## =================================== database secret end. ===================================  
+## =================================== database secret end. ===================================
 
 # Establish a connection to the MySQL database
 try:
     conn = pymysql.connect(
-        host=db_host, 
-        port=int(os.environ.get("DB_PORT",3306)),                       ## Add 6-Aug-25
-        user=db_username, 
-        passwd=db_password, 
-        db=db_name, 
-        connect_timeout=10, 
-        ssl={"ca": "/opt/python/certs/rds-combined-ca-bundle.pem"},     ## Add 6-Aug-25
-        autocommit=True, 
+        host=db_host,
+        port=int(os.environ.get("DB_PORT",3306)), ## Add 6-Aug-25
+        user=db_username,
+        passwd=db_password,
+        db=db_name,
+        connect_timeout=10,
+        ssl={"ca": "/opt/python/certs/rds-combined-ca-bundle.pem"}, ## Add 6-Aug-25
+        autocommit=True,
         charset='utf8mb4' #,cursorclass=pymysql.cursors.DictCursor
     )
 except pymysql.MySQLError as e:
     print("ERROR: Unexpected error: Could not connect to MySQL instance.")
     print(e)
     sys.exit()
-
 print("SUCCESS: Connection to RDS MySQL instance succeeded")
 
-## =================================== Common Functions. =================================== 
+## =================================== Common Functions. ===================================
 def remove_quotes(text):
     return text.strip('"')
 
@@ -119,22 +122,20 @@ def check_missing_params(event, required_params):
         }
     return None
 
-## =================================== AWS Lambda handler. =================================== 
+## =================================== AWS Lambda handler. ===================================
 def lambda_handler(event, context):
-    event_type = event['event_type']  
+    event_type = event['event_type']
     #print(f"event_type: {event_type}")
-    
-    ## ------------ 1. search_tag ------------ 
+
+    # ---------- 1. search_tag ----------
     if event_type == "1":
         print("event_type: =======> 1. search_tag")
         required_params = ['CUSTOMER']
         error_response = check_missing_params(event, required_params)
         if error_response:
             return error_response
-
         PARM_CUST = event['CUSTOMER']
         print(f"CUSTOMER: {PARM_CUST}")
-        
         # Check if PARM_CUST is "AFT" and update it accordingly
         if PARM_CUST == "AFT":
             PARM_CUST = "AFT,AICHI FORGE"
@@ -142,60 +143,55 @@ def lambda_handler(event, context):
             with conn.cursor() as cursor:
                 cursor.execute(f"SELECT customer FROM {TABLE_COMMON_SPEC} GROUP BY customer")
                 customers = cursor.fetchall()
-                PARM_CUST = ','.join([customer[0] for customer in customers])
-                print(f"CUSTOMER: {PARM_CUST}")
-
+            PARM_CUST = ','.join([customer[0] for customer in customers])
+            print(f"CUSTOMER: {PARM_CUST}")
         EXECUTE_QUERY = '''
-            SELECT 
-                customer, 
-                UPPER(specification_) AS spec, 
-                diameter,
-                CONCAT(UPPER(specification_), "_", diameter) AS spec_dia,
-                invoice_no, 
-                inspection, 
-                package_no,
-                CASE
-                    WHEN package_no REGEXP '[0-9]{4}$' THEN LEFT(package_no, LENGTH(package_no)-4)
-                    WHEN package_no REGEXP '[0-9]{3}$' THEN LEFT(package_no, LENGTH(package_no)-3)
-                    WHEN package_no REGEXP '[0-9]{2}$' THEN LEFT(package_no, LENGTH(package_no)-2)
-                    WHEN package_no REGEXP '[0-9]{1}$' THEN LEFT(package_no, LENGTH(package_no)-1)
-                    ELSE package_no
-                END AS bundle_prefix,
-                CASE
-                    WHEN package_no REGEXP '[0-9]{4}$' THEN CAST(RIGHT(package_no, 4) AS SIGNED)
-                    WHEN package_no REGEXP '[0-9]{3}$' THEN CAST(RIGHT(package_no, 3) AS SIGNED)
-                    WHEN package_no REGEXP '[0-9]{2}$' THEN CAST(RIGHT(package_no, 2) AS SIGNED)
-                    WHEN package_no REGEXP '[0-9]{1}$' THEN CAST(RIGHT(package_no, 1) AS SIGNED)
-                    ELSE 0
-                END AS bundle_suffix,
-                CASE
-				    WHEN package_no REGEXP '[0-9]{4}$' THEN REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', LEFT(package_no, LENGTH(package_no)-4)), '/', ''), '(', ''), ')', '')
-				    WHEN package_no REGEXP '[0-9]{3}$' THEN REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', LEFT(package_no, LENGTH(package_no)-3)), '/', ''), '(', ''), ')', '')
-				    WHEN package_no REGEXP '[0-9]{2}$' THEN REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', LEFT(package_no, LENGTH(package_no)-2)), '/', ''), '(', ''), ')', '')
-				    WHEN package_no REGEXP '[0-9]{1}$' THEN REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', LEFT(package_no, LENGTH(package_no)-1)), '/', ''), '(', ''), ')', '')
-				    ELSE REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', IFNULL(package_no, '')), '/', ''), '(', ''), ')', '')
-				END AS millsheet_prefix
-            FROM ''' + TABLE_KSSP + " "
-
-
+        SELECT
+            customer,
+            UPPER(specification_) AS spec,
+            diameter,
+            CONCAT(UPPER(specification_), "_", diameter) AS spec_dia,
+            invoice_no,
+            inspection,
+            package_no,
+            CASE
+                WHEN package_no REGEXP '[0-9]{4}$' THEN LEFT(package_no, LENGTH(package_no)-4)
+                WHEN package_no REGEXP '[0-9]{3}$' THEN LEFT(package_no, LENGTH(package_no)-3)
+                WHEN package_no REGEXP '[0-9]{2}$' THEN LEFT(package_no, LENGTH(package_no)-2)
+                WHEN package_no REGEXP '[0-9]{1}$' THEN LEFT(package_no, LENGTH(package_no)-1)
+                ELSE package_no
+            END AS bundle_prefix,
+            CASE
+                WHEN package_no REGEXP '[0-9]{4}$' THEN CAST(RIGHT(package_no, 4) AS SIGNED)
+                WHEN package_no REGEXP '[0-9]{3}$' THEN CAST(RIGHT(package_no, 3) AS SIGNED)
+                WHEN package_no REGEXP '[0-9]{2}$' THEN CAST(RIGHT(package_no, 2) AS SIGNED)
+                WHEN package_no REGEXP '[0-9]{1}$' THEN CAST(RIGHT(package_no, 1) AS SIGNED)
+                ELSE 0
+            END AS bundle_suffix,
+            CASE
+                 WHEN package_no REGEXP '[0-9]{4}$' THEN REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', LEFT(package_no, LENGTH(package_no)-4)), '/', ''), '(', ''), ')', '')
+                 WHEN package_no REGEXP '[0-9]{3}$' THEN REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', LEFT(package_no, LENGTH(package_no)-3)), '/', ''), '(', ''), ')', '')
+                 WHEN package_no REGEXP '[0-9]{2}$' THEN REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', LEFT(package_no, LENGTH(package_no)-2)), '/', ''), '(', ''), ')', '')
+                 WHEN package_no REGEXP '[0-9]{1}$' THEN REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', LEFT(package_no, LENGTH(package_no)-1)), '/', ''), '(', ''), ')', '')
+                 ELSE REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', IFNULL(package_no, '')), '/', ''), '(', ''), ')', '')
+                END AS millsheet_prefix
+        FROM ''' + TABLE_KSSP + " "
         WHERE_CONDITIONS = f'''
-            WHERE customer IN ({', '.join(f"'{cust.strip()}'" for cust in PARM_CUST.split(','))})
-            GROUP BY UPPER(specification_), diameter, invoice_no, inspection, package_no
+        WHERE customer IN ({', '.join(f"'{cust.strip()}'" for cust in PARM_CUST.split(','))})
+        GROUP BY UPPER(specification_), diameter, invoice_no, inspection, package_no
         '''
         if PARM_CUST == "- All -":
             WHERE_CONDITIONS = ' '
-        
-    ## ------------ 2. search_directsale ------------ 
+
+    # ---------- 2. search_directsale ----------
     elif event_type == "2":
         print("event_type: =======> 2. search_directsale")
         required_params = ['CUSTOMER']
         error_response = check_missing_params(event, required_params)
         if error_response:
             return error_response
-
         PARM_CUST = event['CUSTOMER']
         print(f"CUSTOMER: {PARM_CUST}")
-        
         # Check if PARM_CUST is "AFT" and update it accordingly
         if PARM_CUST == "AFT":
             PARM_CUST = "AFT,AICHI FORGE"
@@ -203,30 +199,29 @@ def lambda_handler(event, context):
             with conn.cursor() as cursor:
                 cursor.execute(f"SELECT customer FROM {TABLE_COMMON_SPEC} GROUP BY customer")
                 customers = cursor.fetchall()
-                PARM_CUST = ','.join([customer[0] for customer in customers])
-                print(f"CUSTOMER: {PARM_CUST}")
-
+            PARM_CUST = ','.join([customer[0] for customer in customers])
+            print(f"CUSTOMER: {PARM_CUST}")
         EXECUTE_QUERY = f'''
-            SELECT ID, specification_, diameter, customer, `length`, `Customer Part no.`, Maker, WH, invoice_no, selling_price, 
-                   inspection, package_no, content_no, nweight, Total, IFNULL(NULLIF(ETA, ""), "") AS ETA, LEFT(ETA, 6) AS ETA_Mon , 
-                   shipment, sc_no, intake_date, src_file_nm, 
-                   DATE_FORMAT(intake_date,"%Y-%m-%d %H:%i:%S") as intake_date , 
-				   DATE_FORMAT(delivery_date,"%Y-%m-%d %H:%i:%S") as delivery_date , 
-				   DATE_FORMAT(actual_delivery,"%Y-%m-%d %H:%i:%S") as actual_delivery , 
-				   DATE_FORMAT(upd_timestamp,"%Y-%m-%d %H:%i:%S") as upd_timestamp 
-            FROM {TABLE_DIRECT_SALE} 
+        SELECT ID, specification_, diameter, customer, `length`, `Customer Part no.`, Maker, WH, invoice_no, selling_price,
+        inspection, package_no, content_no, nweight, Total, IFNULL(NULLIF(ETA, ""), "") AS ETA, LEFT(ETA, 6) AS ETA_Mon ,
+        shipment, sc_no, intake_date, src_file_nm,
+        DATE_FORMAT(intake_date,"%Y-%m-%d %H:%i:%S") as intake_date ,
+                DATE_FORMAT(delivery_date,"%Y-%m-%d %H:%i:%S") as delivery_date ,
+                DATE_FORMAT(actual_delivery,"%Y-%m-%d %H:%i:%S") as actual_delivery ,
+                DATE_FORMAT(upd_timestamp,"%Y-%m-%d %H:%i:%S") as upd_timestamp
+        FROM {TABLE_DIRECT_SALE}
         '''
         WHERE_CONDITIONS = f'''
-            WHERE customer IN ({', '.join(f"'{cust.strip()}'" for cust in PARM_CUST.split(','))})
+        WHERE customer IN ({', '.join(f"'{cust.strip()}'" for cust in PARM_CUST.split(','))})
         '''
-    ## ------------ 3. search_intransit ------------
+
+    # ---------- 3. search_intransit ----------
     elif event_type == "3":
         print("event_type: =======> 3. search_intransit")
         required_params = ['CUSTOMER_SHORTNAME']
         error_response = check_missing_params(event, required_params)
         if error_response:
             return error_response
-
         PARM_CUST = event['CUSTOMER_SHORTNAME']
         # Check if PARM_CUST is "AFT" and update it accordingly
         if PARM_CUST == "AFT":
@@ -235,44 +230,40 @@ def lambda_handler(event, context):
             with conn.cursor() as cursor:
                 cursor.execute(f"SELECT customer FROM {TABLE_COMMON_SPEC} GROUP BY customer")
                 customers = cursor.fetchall()
-                PARM_CUST = ','.join([customer[0] for customer in customers])
-                print(f"CUSTOMER: {PARM_CUST}")
-
+            PARM_CUST = ','.join([customer[0] for customer in customers])
+            print(f"CUSTOMER: {PARM_CUST}")
         print(f"CUSTOMER_SHORTNAME: {PARM_CUST}")
-
         EXECUTE_QUERY = f'''
-            SELECT intransit_month, customer, cust_shortname, invoice_no, SPEC, diameter, cust_part_no, maker, maker_list, `length`,
-                inspection, package_no, content_no, nweight, nweight_round, Total, ETA,
-                CONCAT(SPEC, "_", diameter, "_", IFNULL(cust_part_no, ""), IFNULL(maker, "")) as SPEC_KEYmaker,
-                DATE_FORMAT(upd_timestamp,"%Y-%m-%d %H:%i:%S") as upd_timestamp, src_file_nm
+        SELECT intransit_month, customer, cust_shortname, invoice_no, SPEC, diameter, cust_part_no, maker, maker_list, `length`,
+        inspection, package_no, content_no, nweight, nweight_round, Total, ETA,
+        CONCAT(SPEC, "_", diameter, "_", IFNULL(cust_part_no, ""), IFNULL(maker, "")) as SPEC_KEYmaker,
+        DATE_FORMAT(upd_timestamp,"%Y-%m-%d %H:%i:%S") as upd_timestamp, src_file_nm
+        FROM (
+            SELECT its.*, kssp.customer, kssp.customer as cust_shortname, maker_list
             FROM (
-                SELECT its.*, kssp.customer, kssp.customer as cust_shortname, maker_list
-                FROM (
-                    SELECT LEFT(ETA, 6) as intransit_month, invoice_no, UPPER(specification_) as SPEC, inspection, package_no, content_no,
-                        IFNULL(maker, "") as maker, diameter, `length`,
-                        nweight, ROUND(nweight) as nweight_round, Total, IFNULL(`Customer Part no.`, "") as cust_part_no, ETA, upd_timestamp, src_file_nm
-                    FROM {TABLE_IN_TRANSIT}
-                ) as its
-                LEFT JOIN (
-                    SELECT customer, UPPER(specification_) as k_SPEC, diameter as k_DIA,
-                        IFNULL(`Customer Part no.`, "") as k_cust_part_no, GROUP_CONCAT(DISTINCT maker) as maker_list
-                    FROM {TABLE_KSSP}
-                    GROUP BY customer, k_SPEC, k_DIA, k_cust_part_no
-                ) as kssp
-                ON SPEC = k_SPEC AND diameter = k_DIA AND cust_part_no = k_cust_part_no
-            ) as its_custom 
+                SELECT LEFT(ETA, 6) as intransit_month, invoice_no, UPPER(specification_) as SPEC, inspection, package_no, content_no,
+                IFNULL(maker, "") as maker, diameter, `length`,
+                nweight, ROUND(nweight) as nweight_round, Total, IFNULL(`Customer Part no.`, "") as cust_part_no, ETA, upd_timestamp, src_file_nm
+                FROM {TABLE_IN_TRANSIT}
+            ) as its
+            LEFT JOIN (
+                SELECT customer, UPPER(specification_) as k_SPEC, diameter as k_DIA,
+                IFNULL(`Customer Part no.`, "") as k_cust_part_no, GROUP_CONCAT(DISTINCT maker) as maker_list
+                FROM {TABLE_KSSP}
+                GROUP BY customer, k_SPEC, k_DIA, k_cust_part_no
+            ) as kssp
+            ON SPEC = k_SPEC AND diameter = k_DIA AND cust_part_no = k_cust_part_no
+        ) as its_custom
         '''
+        WHERE_CONDITIONS = f'WHERE cust_shortname IN ({", ".join(f"\'{cust.strip()}\'" for cust in PARM_CUST.split(","))}) '
 
-        WHERE_CONDITIONS = f'WHERE cust_shortname  IN ({', '.join(f"'{cust.strip()}'" for cust in PARM_CUST.split(','))}) '
-    
-    ## ------------ 4. search_forecast ------------
+    # ---------- 4. search_forecast ----------
     elif event_type == "4":
         print("event_type: =======> 4. search_forecast")
         required_params = ['CUSTOMER']
         error_response = check_missing_params(event, required_params)
         if error_response:
             return error_response
-
         PARM_CUST = event['CUSTOMER']
         # Check if PARM_CUST is "AFT" and update it accordingly
         if PARM_CUST == "AFT":
@@ -281,144 +272,120 @@ def lambda_handler(event, context):
             with conn.cursor() as cursor:
                 cursor.execute(f"SELECT customer FROM {TABLE_COMMON_SPEC} GROUP BY customer")
                 customers = cursor.fetchall()
-                PARM_CUST = ','.join([customer[0] for customer in customers])
-                print(f"CUSTOMER: {PARM_CUST}")
-
+            PARM_CUST = ','.join([customer[0] for customer in customers])
+            print(f"CUSTOMER: {PARM_CUST}")
         print(f"CUSTOMER_SHORTNAME: {PARM_CUST}")
-
         EXECUTE_QUERY = f'''
-            SELECT * FROM (
-                SELECT forecast.*, customer_name as cust_shortname, maker_list
-                FROM (
-                    SELECT customer_name, as_of_month, specification, diameter, customer_part_no, maker, `length`,
-                        quantity_kg, forecast_kg, forecast_kg_N1, forecast_kg_N2, forecast_kg_N3, forecast_kg_N4, file_set_id, src_file_nm,
-                        DATE_FORMAT(upd_timestamp,"%Y-%m-%d %H:%i:%S") as upd_timestamp
-                    FROM {TABLE_FORECAST}
-                ) as forecast
-                LEFT JOIN (
-                    SELECT customer, UPPER(specification_) as SPEC, diameter, GROUP_CONCAT(DISTINCTROW maker) as maker_list
-                    FROM {TABLE_KSSP}
-                    GROUP BY customer, SPEC, diameter
-                ) as kssp
-                ON customer_name = customer AND forecast.specification = kssp.SPEC AND forecast.diameter = kssp.diameter
-            ) t1
+        SELECT * FROM (
+            SELECT forecast.*, customer_name as cust_shortname, maker_list
+            FROM (
+                SELECT customer_name, as_of_month, specification, diameter, customer_part_no, maker, `length`,
+                quantity_kg, forecast_kg, forecast_kg_N1, forecast_kg_N2, forecast_kg_N3, forecast_kg_N4, file_set_id, src_file_nm,
+                DATE_FORMAT(upd_timestamp,"%Y-%m-%d %H:%i:%S") as upd_timestamp
+                FROM {TABLE_FORECAST}
+            ) as forecast
+            LEFT JOIN (
+                SELECT customer, UPPER(specification_) as SPEC, diameter, GROUP_CONCAT(DISTINCTROW maker) as maker_list
+                FROM {TABLE_KSSP}
+                GROUP BY customer, SPEC, diameter
+            ) as kssp
+            ON customer_name = customer AND forecast.specification = kssp.SPEC AND forecast.diameter = kssp.diameter
+        ) t1
         '''
+        WHERE_CONDITIONS = f'WHERE cust_shortname IN ({", ".join(f"\'{cust.strip()}\'" for cust in PARM_CUST.split(","))}) '
 
-        WHERE_CONDITIONS = f'WHERE cust_shortname  IN ({', '.join(f"'{cust.strip()}'" for cust in PARM_CUST.split(','))}) '
-
-    ## ------------ 5. get_upd_timestamp ------------
+    # ---------- 5. get_upd_timestamp ----------
     elif event_type == "5":
         print("event_type: =======> 5. get_upd_timestamp")
         EXECUTE_QUERY = f"SELECT stamp_month, upd_timestamp, src_file_nm, src_table FROM {UPD_TIMESTAMP} "
         WHERE_CONDITIONS = "WHERE src_table NOT IN ('fg' , 'mc' , 'shipout') ORDER BY stamp_month DESC, upd_timestamp DESC ;"
 
-    ## ------------ 5-1. get_upd_timestamp_fg ------------
+    # ---------- 5-1. get_upd_timestamp_fg ----------
     elif event_type == "5-1":
         print("event_type: =======> 5-1. get_upd_timestamp_fg")
         EXECUTE_QUERY = f"SELECT stamp_month, upd_timestamp, src_file_nm, src_table FROM {UPD_TIMESTAMP} "
         WHERE_CONDITIONS = "WHERE src_table IN ('fg' , 'mc' , 'shipout') ORDER BY stamp_month DESC, upd_timestamp DESC ;"
-    
-    ## ------------ 6. search_cuttingcenter_mc ------------
+
+    # ---------- 6. search_cuttingcenter_mc ----------
     elif event_type == "6":
-
         print("event_type: =======> 6. search_cuttingcenter_mc")
-
         EXECUTE_QUERY = f'''
-            SELECT cutting_center, customer, UPPER(specification_) as spec, diameter as width, thick, `Customer Part no.`, Maker, content_no, nweight, barcode , `Actual Delivery` ,
-            CONCAT(UPPER(specification_), "_", diameter, "_", thick, "_", IFNULL(`Customer Part no.`, ""), IFNULL(Maker, "")) AS SPEC_KEYwithMAKER 
-            FROM {TABLE_MC}
+        SELECT cutting_center, customer, UPPER(specification_) as spec, diameter as width, thick, `Customer Part no.`, Maker, content_no, nweight, barcode , `Actual Delivery` ,
+        CONCAT(UPPER(specification_), "_", diameter, "_", thick, "_", IFNULL(`Customer Part no.`, ""), IFNULL(Maker, "")) AS SPEC_KEYwithMAKER
+        FROM {TABLE_MC}
         '''
-
         CUTTING_CENTER = event.get('CUTTING_CENTER', '')
         CUSTOMER = event.get('CUSTOMER', '')
-
         WHERE_CONDITIONS = "WHERE (`Actual Delivery` is NULL or `Actual Delivery` = '')"
-
         if CUTTING_CENTER:
             WHERE_CONDITIONS += f" AND cutting_center = '{CUTTING_CENTER}'"
-
         if CUSTOMER:
             WHERE_CONDITIONS += f" AND customer = '{CUSTOMER}'"
 
-
-    ## ------------ 7. search_cuttingcenter_fg ------------ (NOT USED)
+    # ---------- 7. search_cuttingcenter_fg (NOT USED) ----------
     elif event_type == "7":
         thai_time = datetime.utcnow() + timedelta(hours=7)
         as_of_month = thai_time.strftime('%Y%m')
         print(f"event_type: =======> 7. search_cuttingcenter_fg, as_of_month: {as_of_month}")
-        
         CUTTING_CENTER = event.get('CUTTING_CENTER', '')
-        
         if not CUTTING_CENTER:
             CUTTING_CENTER = ''
-
         if CUTTING_CENTER:
             FILTER_CONDITIONS = f"WHERE as_of_month = '{as_of_month}' AND cutting_center = '{CUTTING_CENTER}' "
         else:
             FILTER_CONDITIONS = f"WHERE as_of_month = '{as_of_month}' "
-
         EXECUTE_QUERY = f'''
-            SELECT * 
-            FROM {TABLE_MONBAL_FG} {FILTER_CONDITIONS} 
-            GROUP BY SPEC_KEYMAKER
+        SELECT *
+        FROM {TABLE_MONBAL_FG} {FILTER_CONDITIONS}
+        GROUP BY SPEC_KEYMAKER
         '''
         WHERE_CONDITIONS = " "
 
-    ## ------------ 8. search_fg_mc_all_customers ------------ 
+    # ---------- 8. search_fg_mc_all_customers ----------
     elif event_type == "8":
-
         print(f"event_type: =======> {event_type}. search_fg_all_customers")
-
         EXECUTE_QUERY = f'''
-WITH 
-	fg AS (
-	    SELECT center AS cutting_center, customer, 'fg' AS table_type
-	    FROM {TABLE_FG} 
-	    GROUP BY cutting_center, customer
-	),
-	mc AS (
-	    SELECT center AS cutting_center, customer, 'mc' AS table_type
-	    FROM {TABLE_MC} 
-	    GROUP BY cutting_center, customer
-	),
-	un AS (
-		SELECT * FROM fg
-		UNION ALL
-		SELECT * FROM mc
-	)
-SELECT * FROM un 
-GROUP BY cutting_center, customer, table_type 
+WITH
+    fg AS (
+     SELECT center AS cutting_center, customer, 'fg' AS table_type
+     FROM {TABLE_FG}
+     GROUP BY cutting_center, customer
+    ),
+    mc AS (
+     SELECT center AS cutting_center, customer, 'mc' AS table_type
+     FROM {TABLE_MC}
+     GROUP BY cutting_center, customer
+    ),
+    un AS (
+        SELECT * FROM fg
+        UNION ALL
+        SELECT * FROM mc
+    )
+SELECT * FROM un
+GROUP BY cutting_center, customer, table_type
         '''
         WHERE_CONDITIONS = " ORDER BY customer;"
 
-    ## --- execute SQL ---
-
+    # --- execute SQL ---
     try:
         with conn.cursor() as cursor:
             cursor.execute(EXECUTE_QUERY + WHERE_CONDITIONS)
             cursor.connection.commit()
-
             # Extract row headers
             row_headers = [x[0] for x in cursor.description]
-
             # Fetch the results
             results = cursor.fetchall()
-
             # Format the results as a list of dictionaries
             json_data = [dict(zip(row_headers, row)) for row in results]
-
             # Get the number of affected rows
             affected_rows = cursor.rowcount
-
             if event_type == "5":
                 print(json_data)
-
             return {
                 'statusCode': 200,
                 'count': affected_rows,
                 'body': json_data
             }
-
     except Exception as e:
         # Prepare error log content
         errorMessage = f"""
@@ -443,7 +410,6 @@ EXECUTE_QUERY:
             Key=error_filename,
             Body=error_query.encode('utf-8')
         )
-
         print(f"Query execution failed. Logged to S3 as {error_filename}")
         return {
             'statusCode': 500,
