@@ -4,6 +4,7 @@ AWS Lambda function to search RDS MySQL database based on event_type and paramet
 last updated:
 2024-08-29 16:00 TTS-T Saowanee) revise upd_timestamp query to exclude fg, mc, shipout
 2025-09-10 15:30 TTS-T Saowanee) apply boto3 logger to CloudWatch
+2025-09-17 14:00 TTS-T Saowanee) Revise timestamp & timestamp_fg & delete No.6 & 7
 '''
 import json
 import pymysql
@@ -298,48 +299,14 @@ def lambda_handler(event, context):
     elif event_type == "5":
         print("event_type: =======> 5. get_upd_timestamp")
         EXECUTE_QUERY = f"SELECT stamp_month, upd_timestamp, src_file_nm, src_table FROM {UPD_TIMESTAMP} "
-        WHERE_CONDITIONS = "WHERE src_table NOT IN ('fg' , 'mc' , 'shipout') ORDER BY stamp_month DESC, upd_timestamp DESC ;"
+        WHERE_CONDITIONS = "WHERE src_table NOT IN ('fg' , 'mc' , 'shipout') ORDER BY stamp_month DESC, upd_timestamp DESC LIMIT 1 ;"
 
-    # ---------- 5-1. get_upd_timestamp_fg ----------
-    elif event_type == "5-1":
-        print("event_type: =======> 5-1. get_upd_timestamp_fg")
-        EXECUTE_QUERY = f"SELECT stamp_month, upd_timestamp, src_file_nm, src_table FROM {UPD_TIMESTAMP} "
-        WHERE_CONDITIONS = "WHERE src_table IN ('fg' , 'mc' , 'shipout') ORDER BY stamp_month DESC, upd_timestamp DESC ;"
-
-    # ---------- 6. search_cuttingcenter_mc ----------
+    # ---------- 6. get_upd_timestamp_fg ----------
     elif event_type == "6":
-        print("event_type: =======> 6. search_cuttingcenter_mc")
-        EXECUTE_QUERY = f'''
-        SELECT cutting_center, customer, UPPER(specification_) as spec, diameter as width, thick, `Customer Part no.`, Maker, content_no, nweight, barcode , `Actual Delivery` ,
-        CONCAT(UPPER(specification_), "_", diameter, "_", thick, "_", IFNULL(`Customer Part no.`, ""), IFNULL(Maker, "")) AS SPEC_KEYwithMAKER
-        FROM {TABLE_MC}
-        '''
-        CUTTING_CENTER = event.get('CUTTING_CENTER', '')
-        CUSTOMER = event.get('CUSTOMER', '')
-        WHERE_CONDITIONS = "WHERE (`Actual Delivery` is NULL or `Actual Delivery` = '')"
-        if CUTTING_CENTER:
-            WHERE_CONDITIONS += f" AND cutting_center = '{CUTTING_CENTER}'"
-        if CUSTOMER:
-            WHERE_CONDITIONS += f" AND customer = '{CUSTOMER}'"
+        print("event_type: =======> 6. get_upd_timestamp_fg")
+        EXECUTE_QUERY = f"SELECT stamp_month, upd_timestamp, src_file_nm, src_table FROM {UPD_TIMESTAMP} "
+        WHERE_CONDITIONS = "WHERE src_table IN ('fg' , 'mc' , 'shipout') ORDER BY stamp_month DESC, upd_timestamp DESC LIMIT 1 ;"
 
-    # ---------- 7. search_cuttingcenter_fg (NOT USED) ----------
-    elif event_type == "7":
-        thai_time = datetime.utcnow() + timedelta(hours=7)
-        as_of_month = thai_time.strftime('%Y%m')
-        print(f"event_type: =======> 7. search_cuttingcenter_fg, as_of_month: {as_of_month}")
-        CUTTING_CENTER = event.get('CUTTING_CENTER', '')
-        if not CUTTING_CENTER:
-            CUTTING_CENTER = ''
-        if CUTTING_CENTER:
-            FILTER_CONDITIONS = f"WHERE as_of_month = '{as_of_month}' AND cutting_center = '{CUTTING_CENTER}' "
-        else:
-            FILTER_CONDITIONS = f"WHERE as_of_month = '{as_of_month}' "
-        EXECUTE_QUERY = f'''
-        SELECT *
-        FROM {TABLE_MONBAL_FG} {FILTER_CONDITIONS}
-        GROUP BY SPEC_KEYMAKER
-        '''
-        WHERE_CONDITIONS = " "
 
     # ---------- 8. search_fg_mc_all_customers ----------
     elif event_type == "8":
