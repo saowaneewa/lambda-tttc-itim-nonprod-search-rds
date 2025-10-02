@@ -2,9 +2,10 @@
 AWS Lambda function to search RDS MySQL database based on event_type and parameters.
 ---------------------------------------------------------
 last updated:
-2024-08-29 16:00 TTS-T Saowanee) revise upd_timestamp query to exclude fg, mc, shipout
-2025-09-10 15:30 TTS-T Saowanee) apply boto3 logger to CloudWatch
-2025-09-17 14:00 TTS-T Saowanee) Revise timestamp & timestamp_fg & delete No.6 & 7
+[2024-08-29 16:00] TTS-T Saowanee) revise upd_timestamp query to exclude fg, mc, shipout
+[2025-09-10 15:30] TTS-T Saowanee) apply boto3 logger to CloudWatch
+[2025-09-17 14:00] TTS-T Saowanee) Revise timestamp & timestamp_fg & delete No.6 & 7
+[2025-10-02 15:00] TTS-T Saowanee) Revise search_tag - search from new view TABLE_VIEW_TAGS #1
 '''
 import json
 import pymysql
@@ -14,6 +15,8 @@ import sys
 import logging
 from datetime import datetime, timedelta
 import traceback
+import csv
+from io import StringIO
 
 # const
 TABLE_KSSP = "KSSP_BAL_STOCK1"  # "KSSP_BAL_STOCK_testing"
@@ -25,6 +28,7 @@ TABLE_MONBAL_FG = "MONTHLY_MS2_FG"  # "CUTTINGCENTER_BAL_FG2"
 TABLE_FG = "CUTTINGCENTER_BAL_FG"
 TABLE_MC = "CUTTINGCENTER_BAL_MC"
 UPD_TIMESTAMP = "UPD_TIMESTAMP"
+TABLE_VIEW_TAGS = "STOCK_MILLSHEET_TAG"
 
 # ===== boto3/botocore streaming logger (to CloudWatch via stdout) =====
 # Control with env var BOTO3_LOG_LEVEL = DEBUG|INFO|WARNING|ERROR|CRITICAL (default: WARNING)
@@ -123,6 +127,26 @@ def check_missing_params(event, required_params):
         }
     return None
 
+def format_customer_input(customer_input):
+    customer_input = customer_input.strip()
+    
+    # Remove surrounding parentheses if present
+    if customer_input.startswith('(') and customer_input.endswith(')'):
+        customer_input = customer_input[1:-1]
+
+    # Split by comma and clean each item
+    customers_list = []
+    reader = csv.reader(StringIO(customer_input), skipinitialspace=True)
+    customers_list = next(reader)
+
+    # Format output based on number of items 
+    if len(customers_list) == 1:
+        customers_tuple_str = f"('{customers_list[0].strip()}')"
+    else:
+        customers_tuple_str = str(tuple(customers_list))
+
+    return customers_tuple_str
+
 ## =================================== AWS Lambda handler. ===================================
 def lambda_handler(event, context):
     event_type = event['event_type']
@@ -137,52 +161,13 @@ def lambda_handler(event, context):
             return error_response
         PARM_CUST = event['CUSTOMER']
         print(f"CUSTOMER: {PARM_CUST}")
-        # Check if PARM_CUST is "AFT" and update it accordingly
-        if PARM_CUST == "AFT":
-            PARM_CUST = "AFT,AICHI FORGE"
-        elif PARM_CUST == "COMMON SPEC":
-            with conn.cursor() as cursor:
-                cursor.execute(f"SELECT customer FROM {TABLE_COMMON_SPEC} GROUP BY customer")
-                customers = cursor.fetchall()
-            PARM_CUST = ','.join([customer[0] for customer in customers])
-            print(f"CUSTOMER: {PARM_CUST}")
-        EXECUTE_QUERY = '''
-        SELECT
-            customer,
-            UPPER(specification_) AS spec,
-            diameter,
-            CONCAT(UPPER(specification_), "_", diameter) AS spec_dia,
-            invoice_no,
-            inspection,
-            package_no,
-            CASE
-                WHEN package_no REGEXP '[0-9]{4}$' THEN LEFT(package_no, LENGTH(package_no)-4)
-                WHEN package_no REGEXP '[0-9]{3}$' THEN LEFT(package_no, LENGTH(package_no)-3)
-                WHEN package_no REGEXP '[0-9]{2}$' THEN LEFT(package_no, LENGTH(package_no)-2)
-                WHEN package_no REGEXP '[0-9]{1}$' THEN LEFT(package_no, LENGTH(package_no)-1)
-                ELSE package_no
-            END AS bundle_prefix,
-            CASE
-                WHEN package_no REGEXP '[0-9]{4}$' THEN CAST(RIGHT(package_no, 4) AS SIGNED)
-                WHEN package_no REGEXP '[0-9]{3}$' THEN CAST(RIGHT(package_no, 3) AS SIGNED)
-                WHEN package_no REGEXP '[0-9]{2}$' THEN CAST(RIGHT(package_no, 2) AS SIGNED)
-                WHEN package_no REGEXP '[0-9]{1}$' THEN CAST(RIGHT(package_no, 1) AS SIGNED)
-                ELSE 0
-            END AS bundle_suffix,
-            CASE
-                 WHEN package_no REGEXP '[0-9]{4}$' THEN REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', LEFT(package_no, LENGTH(package_no)-4)), '/', ''), '(', ''), ')', '')
-                 WHEN package_no REGEXP '[0-9]{3}$' THEN REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', LEFT(package_no, LENGTH(package_no)-3)), '/', ''), '(', ''), ')', '')
-                 WHEN package_no REGEXP '[0-9]{2}$' THEN REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', LEFT(package_no, LENGTH(package_no)-2)), '/', ''), '(', ''), ')', '')
-                 WHEN package_no REGEXP '[0-9]{1}$' THEN REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', LEFT(package_no, LENGTH(package_no)-1)), '/', ''), '(', ''), ')', '')
-                 ELSE REPLACE(REPLACE(REPLACE(CONCAT(customer, '_', invoice_no, '_', specification_, '_', diameter, '_', inspection, '_', IFNULL(package_no, '')), '/', ''), '(', ''), ')', '')
-                END AS millsheet_prefix
-        FROM ''' + TABLE_KSSP + " "
+
+        formatted_cust = format_customer_input(PARM_CUST)
+
+        EXECUTE_QUERY = f'''
+	        SELECT * FROM {TABLE_VIEW_TAGS} '''
         WHERE_CONDITIONS = f'''
-        WHERE customer IN ({', '.join(f"'{cust.strip()}'" for cust in PARM_CUST.split(','))})
-        GROUP BY UPPER(specification_), diameter, invoice_no, inspection, package_no
-        '''
-        if PARM_CUST == "- All -":
-            WHERE_CONDITIONS = ' '
+            WHERE customer IN {formatted_cust} '''
 
     # ---------- 2. search_directsale ----------
     elif event_type == "2":
